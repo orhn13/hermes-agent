@@ -258,3 +258,46 @@ class TestHandleReapTool:
         result = _call_reap(conn, task_id=tid, action="complete", reason="x")
         assert "error" in result
         assert "action" in result["error"]
+
+
+class TestReapReadyUndispatchable:
+    def _mk_ready_undispatchable(self, conn, *, assignee="coordinator", title="target-card"):
+        tid = kb.create_task(conn, title=title, assignee="default", created_by="tester")
+        conn.execute("UPDATE tasks SET assignee=? WHERE id=?", (assignee, tid))
+        conn.commit()
+        return tid
+
+    def test_rejects_ready_task_with_spawnable_assignee(self, conn):
+        tid = _mk(conn, status="ready", assignee="w")
+        with pytest.raises(ValueError, match="ready"):
+            kb.reap_task(conn, tid, action="archive", reason="x")
+
+    @pytest.mark.real_profile_existence
+    def test_archives_ready_task_with_undispatchable_assignee(self, conn):
+        tid = self._mk_ready_undispatchable(conn)
+        assert kb.reap_task(
+            conn, tid, action="archive",
+            reason="t_648531f3: assignee is not a real profile, dispatcher will never claim this",
+        ) is True
+        assert conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (tid,)
+        ).fetchone()["status"] == "archived"
+
+    @pytest.mark.real_profile_existence
+    def test_refuses_unblock_on_ready_undispatchable(self, conn):
+        tid = self._mk_ready_undispatchable(conn)
+        with pytest.raises(ValueError, match="ready"):
+            kb.reap_task(conn, tid, action="unblock", reason="x")
+        assert conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (tid,)
+        ).fetchone()["status"] == "ready"
+
+    @pytest.mark.real_profile_existence
+    def test_archives_via_tool_layer(self, conn):
+        tid = self._mk_ready_undispatchable(conn, title="t_bb62ba0a-shaped")
+        result = _call_reap(
+            conn, task_id=tid, action="archive",
+            reason="undispatchable assignee, children already rerouted",
+        )
+        assert result["ok"] is True
+        assert result["status"] == "archived"

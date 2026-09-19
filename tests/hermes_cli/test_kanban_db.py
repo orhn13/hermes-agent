@@ -1302,6 +1302,99 @@ def test_link_tasks_archived_parent_is_terminal_no_gate(kanban_home):
         assert "dependency_wait" not in [e.kind for e in kb.list_events(conn, child)]
 
 
+@pytest.mark.real_profile_existence
+def test_create_task_rejects_assignee_that_is_not_a_profile(kanban_home):
+    with kbc.connect() as conn:
+        with pytest.raises(ValueError, match="coordinator"):
+            kb.create_task(conn, title="t_bb62ba0a-shaped bug", assignee="coordinator")
+        assert kb.list_tasks(conn) == []
+
+
+@pytest.mark.real_profile_existence
+def test_create_task_accepts_default_with_no_profiles_installed(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="always resolves", assignee="default")
+        assert kb.get_task(conn, tid).assignee == "default"
+
+
+@pytest.mark.real_profile_existence
+def test_create_task_still_allows_unassigned(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="unassigned is unchanged")
+        assert kb.get_task(conn, tid).assignee is None
+
+
+@pytest.mark.real_profile_existence
+def test_assign_task_rejects_assignee_that_is_not_a_profile(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="job", assignee="default")
+        with pytest.raises(ValueError, match="coder"):
+            kb.assign_task(conn, tid, "coder")
+        assert kb.get_task(conn, tid).assignee == "default"
+
+
+@pytest.mark.real_profile_existence
+def test_reassign_task_rejects_assignee_that_is_not_a_profile(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="job", assignee="default")
+        with pytest.raises(ValueError, match="coder"):
+            kb.reassign_task(conn, tid, "coder")
+        assert kb.get_task(conn, tid).assignee == "default"
+
+
+@pytest.mark.real_profile_existence
+def test_link_tasks_refuses_child_under_undispatchable_ready_parent(kanban_home):
+    from hermes_cli import profiles
+
+    with kbc.connect() as conn:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(profiles, "profile_exists", lambda name: True)
+            parent = kb.create_task(conn, title="t_bb62ba0a-shaped parent", assignee="coordinator")
+            child = kb.create_task(conn, title="t_054fea21-shaped child")
+
+        with pytest.raises(ValueError, match="coordinator"):
+            kb.link_tasks(conn, parent, child)
+        assert kb.get_task(conn, child).status == "ready"
+        assert kb.child_ids(conn, parent) == []
+
+
+@pytest.mark.real_profile_existence
+def test_link_tasks_allows_child_once_undispatchable_parent_is_reassigned(kanban_home):
+    from hermes_cli import profiles
+
+    with kbc.connect() as conn:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(profiles, "profile_exists", lambda name: True)
+            parent = kb.create_task(conn, title="t_bb62ba0a-shaped parent", assignee="coordinator")
+            child = kb.create_task(conn, title="t_054fea21-shaped child")
+
+        kb.assign_task(conn, parent, "default")
+
+        gated = kb.link_tasks(conn, parent, child)
+
+        assert gated is True
+        assert kb.get_task(conn, child).status == "todo"
+        assert kb.child_ids(conn, parent) == [child]
+
+
+@pytest.mark.real_profile_existence
+def test_link_tasks_allows_child_under_running_control_plane_lane_parent(kanban_home):
+    from hermes_cli import profiles
+
+    with kbc.connect() as conn:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(profiles, "profile_exists", lambda name: True)
+            parent = kb.create_task(conn, title="external terminal lane", assignee="sdlc-review")
+            kb.claim_task(conn, parent, claimer="terminal:1")
+
+        child = kb.create_task(conn, title="follower")
+
+        gated = kb.link_tasks(conn, parent, child)
+
+        assert gated is True
+        assert kb.get_task(conn, child).status == "todo"
+
+
 def test_unlink_tasks_triggers_recompute_ready(kanban_home):
     """Regression test for issue #22459.
 

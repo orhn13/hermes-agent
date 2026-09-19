@@ -1316,6 +1316,12 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
         "dispatcher's memory guard to 'no data' — only for tests that "
         "exercise the guard itself with their own patched samples.",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_profile_existence: bypass the autouse fixture (tests/hermes_cli/conftest.py) "
+        "that pins profiles.profile_exists to always-True — only for tests of "
+        "create_task/dispatch assignee validation itself.",
+    )
     # NOTE: linux_only / macos_only / windows_only are declared in
     # pyproject.toml's ``markers`` list, not here — they are part of the
     # project's public marker vocabulary (``pytest --markers``, and the CI
