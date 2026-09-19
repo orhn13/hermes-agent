@@ -213,7 +213,8 @@ def test_max_spawn_stays_per_board(kanban_home, all_assignees_spawnable):
 
 
 def _park_in_review(conn: sqlite3.Connection, title: str, assignee: str) -> str:
-    tid = kb.create_task(conn, title=title, assignee=assignee)
+    tid = kb.create_task(conn, title=title, assignee="alice")
+    conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (assignee, tid))
     _set_task_status(conn, tid, "review")
     return tid
 

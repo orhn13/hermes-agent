@@ -141,7 +141,7 @@ def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeyp
     assert killed == []
 
     # The process is gone (a dead PID): the row is reclaimed like any dead worker, still no signal.
-    tid2 = kb.create_task(conn, title="job2", assignee="worker")
+    tid2 = kb.create_task(conn, title="job2", assignee="default")
     kb.claim_task(conn, tid2)
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ?, claim_expires = ? WHERE id = ?",

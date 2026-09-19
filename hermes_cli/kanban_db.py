@@ -1115,6 +1115,46 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _profile_is_spawnable(assignee: Optional[str]) -> bool:
+    if not assignee:
+        return True
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:
+        return True
+    return profile_exists(assignee)
+
+
+def _require_spawnable_assignee(assignee: Optional[str]) -> None:
+    if _profile_is_spawnable(assignee):
+        return
+    raise ValueError(
+        f"assignee {assignee!r} is not an installed Hermes profile — create it first "
+        f"(`hermes -p {assignee} setup`) or pass an existing profile name. A card whose "
+        f"assignee cannot dispatch would sit in 'ready' forever and, if it has children, "
+        f"gate them permanently."
+    )
+
+
+_PARENT_EDGE_EXEMPT_STATUSES = frozenset({"done", "archived", "running", "review"})
+
+
+def _require_dispatchable_parent(conn: sqlite3.Connection, parent_id: str) -> None:
+    row = conn.execute(
+        "SELECT status, assignee FROM tasks WHERE id = ?", (parent_id,)
+    ).fetchone()
+    if row is None or row["status"] in _PARENT_EDGE_EXEMPT_STATUSES:
+        return
+    if _profile_is_spawnable(row["assignee"]):
+        return
+    raise ValueError(
+        f"refusing to link a child under {parent_id}: its assignee {row['assignee']!r} is not "
+        f"an installed profile, so it will never dispatch and would gate the child forever. "
+        f"Reassign {parent_id} to a real profile first (`kanban_db.assign_task`), or use "
+        f"`reap_task`/an archive to retire it, then link."
+    )
+
+
 def _resolve_project_link(
     conn: sqlite3.Connection, project_id: Optional[str], project_source_task_id: Optional[str],
     workspace_kind: str, workspace_path: Optional[str],
@@ -1278,6 +1318,7 @@ def create_task(
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
+    _require_spawnable_assignee(assignee)
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -1541,6 +1582,7 @@ def list_tasks(
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
     """Assign/reassign; raises RuntimeError while the task is running under a claim."""
     profile = _canonical_assignee(profile)
+    _require_spawnable_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
@@ -1630,6 +1672,7 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
             raise ValueError(f"unknown task(s): {', '.join(missing)}")
         if _would_cycle(conn, parent_id, child_id):
             raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
+        _require_dispatchable_parent(conn, parent_id)
         _link(conn, parent_id, child_id)
         # If child was ready but parent is not yet terminal, demote child to todo
         # (archived counts as terminal, matching _parents_satisfied/recompute_ready).
@@ -3787,6 +3830,15 @@ the trust boundary moves from \"never touch another task\" to \"never touch
 another task's LIVE work\", which archive/unblock-from-blocked can't do."""
 
 
+def _reap_eligible_ready_undispatchable(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT status, assignee FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None or row["status"] != "ready" or not row["assignee"]:
+        return False
+    return not _profile_is_spawnable(row["assignee"])
+
+
 def reap_task(
     conn: sqlite3.Connection, task_id: str, *, action: str, reason: str,
     actor_task_id: Optional[str] = None, author: str = "worker",
@@ -3833,10 +3885,17 @@ def reap_task(
     if task is None:
         raise ValueError(f"unknown task {task_id}")
     if task.status not in _REAP_TASK_SOURCE_STATUSES:
-        raise ValueError(
-            f"{task_id} is {task.status!r} — kanban_reap only retires a card that is "
-            f"currently {' or '.join(_REAP_TASK_SOURCE_STATUSES)} (no live claim to race, "
-            "no resolved outcome to overwrite); use kanban_comment to flag anything else")
+        ready_undispatchable = (
+            action == "archive"
+            and task.status == "ready"
+            and _reap_eligible_ready_undispatchable(conn, task_id)
+        )
+        if not ready_undispatchable:
+            raise ValueError(
+                f"{task_id} is {task.status!r} — kanban_reap only retires a card that is "
+                f"currently {' or '.join(_REAP_TASK_SOURCE_STATUSES)}, or a 'ready' card whose "
+                f"assignee {task.assignee!r} cannot dispatch (archive only; no live claim to "
+                "race either way); use kanban_comment to flag anything else")
     ok = archive_task(conn, task_id) if action == "archive" else unblock_task(conn, task_id)
     if ok:
         with write_txn(conn):
