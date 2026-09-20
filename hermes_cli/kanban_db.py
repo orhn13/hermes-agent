@@ -708,6 +708,8 @@ class Task:
     consecutive_failures: int = 0
     worker_pid: Optional[int] = None
     last_failure_error: Optional[str] = None
+    last_failure_benign: bool = False
+    last_failure_at: Optional[int] = None
     max_runtime_seconds: Optional[int] = None
     last_heartbeat_at: Optional[int] = None
     current_run_id: Optional[int] = None
@@ -742,6 +744,8 @@ class Task:
             # reachable on a DB never opened since the rename migration landed.
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
+            last_failure_benign=bool(g("last_failure_benign") or 0),
+            last_failure_at=g("last_failure_at"),
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
@@ -900,6 +904,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     worker_started_at    INTEGER,
     -- Short excerpt of the most recent failure's error text.
     last_failure_error   TEXT,
+    last_failure_benign  INTEGER NOT NULL DEFAULT 0,
+    last_failure_at      INTEGER,
     max_runtime_seconds  INTEGER,
     last_heartbeat_at    INTEGER,
     -- Pointer into task_runs for the currently-active run (NULL if no
@@ -1556,7 +1562,8 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
             # The failure streak is per task/profile; a new profile starts fresh.
             conn.execute(
                 "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
-                "last_failure_error = NULL WHERE id = ?", (profile, task_id),
+                "last_failure_error = NULL, last_failure_benign = 0, "
+                "last_failure_at = NULL WHERE id = ?", (profile, task_id),
             )
         else:
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
@@ -3466,7 +3473,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # is a fresh start for the retry budget.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
+            "consecutive_failures = 0, last_failure_error = NULL, "
+            "last_failure_benign = 0, last_failure_at = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
         )
         if cur.rowcount != 1:

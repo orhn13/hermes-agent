@@ -386,6 +386,43 @@ def test_rate_limit_exit_requeues_without_counting_failure(
         assert "crashed" not in outcomes
 
 
+def test_genuine_failure_after_benign_requeue_still_trips_breaker(
+    kanban_home, monkeypatch,
+):
+    """Regression for the immortality bug: a benign rate-limit requeue must
+    not make the task permanently immune to the failure counter. A real
+    crash/timeout arriving right after one still accumulates and, at the
+    configured limit, still blocks the card — the benign flag is cleared
+    the moment a genuine failure is recorded."""
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="then-crashes", assignee="a", max_retries=2)
+
+        conn.execute(
+            "UPDATE tasks SET last_failure_error = ?, last_failure_benign = 1 "
+            "WHERE id = ?",
+            ("pid 1 exited rate-limited (quota wall) — requeued", tid),
+        )
+        conn.commit()
+        assert kb.get_task(conn, tid).last_failure_benign is True
+
+        _kbd._record_task_failure(conn, tid, "real crash: segfault", outcome="crashed", release_claim=False)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures == 1
+        assert task.last_failure_benign is False
+        assert task.status != "blocked"
+
+        _kbd._record_task_failure(conn, tid, "real crash: segfault", outcome="crashed", release_claim=False)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures == 2
+        assert task.status == "blocked", (
+            "a real failure streak must still trip the breaker even though "
+            "the streak started right after a benign requeue"
+        )
+        assert task.last_failure_benign is False
+
+
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(
