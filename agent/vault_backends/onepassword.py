@@ -4,7 +4,8 @@ Unlock: ``op signin --raw`` with the master password on stdin (desktop-app
 integration or account-level auth) mints an ``OP_SESSION_<account>`` token.
 A configured service-account token skips the prompt entirely (headless).
 List: ``op item list --categories Login --format json`` → title, urls,
-username. Resolve: ``op item get <id> --fields label=password --reveal``.
+username, vault. Resolve: ``op item get <id> --vault <vault-id> --fields
+label=password --reveal``; service accounts refuse ``item get`` without ``--vault``.
 """
 
 from __future__ import annotations
@@ -98,12 +99,28 @@ class OnePasswordLoginBackend(LoginBackend):
         return proc.stdout or ""
 
     # ── backend contract ───────────────────────────────────────────────────
+    def _login_items(self) -> List[Dict]:
+        raw = json.loads(self._run("item", "list", "--categories", "Login", "--format", "json") or "[]")
+        return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+    def _vault_id_of(self, item_id: str) -> Optional[str]:
+        for item in self._login_items():
+            vault = item.get("vault")
+            if item.get("id") == item_id and isinstance(vault, dict) and vault.get("id"):
+                return str(vault["id"])
+        return None
+
+    def _get_item_in_its_vault(self, handle: str, *options: str) -> str:
+        item_id = handle[len(self.prefix):]
+        vault_id = self._vault_id_of(item_id)
+        vault_args = ("--vault", vault_id) if vault_id else ()
+        return self._run("item", "get", item_id, *vault_args, *options)
+
     def list_items(self) -> List[VaultItemMeta]:
         if not self.is_unlocked():
             return []
-        raw = json.loads(self._run("item", "list", "--categories", "Login", "--format", "json") or "[]")
         out: List[VaultItemMeta] = []
-        for item in raw if isinstance(raw, list) else []:
+        for item in self._login_items():
             urls = [str(u["href"]) for u in item.get("urls") or [] if isinstance(u, dict) and u.get("href")]
             origins = _all_origins(urls)
             if not origins:
@@ -120,13 +137,12 @@ class OnePasswordLoginBackend(LoginBackend):
         return next((m for m in self.list_items() if m.id == handle), None)
 
     def resolve_password(self, handle: str) -> str:
-        item_id = handle[len(self.prefix):]
-        return self._run("item", "get", item_id, "--fields", "label=password", "--reveal").rstrip("\r\n")
+        return self._get_item_in_its_vault(handle, "--fields", "label=password", "--reveal").rstrip("\r\n")
 
     def resolve_otp(self, handle: str) -> Optional[str]:
         # `--otp` mints the current TOTP from the item's one-time-password field; items without one error out.
         try:
-            code = self._run("item", "get", handle[len(self.prefix):], "--otp").strip()
+            code = self._get_item_in_its_vault(handle, "--otp").strip()
         except Exception:
             return None
         return code if code.isdigit() else None

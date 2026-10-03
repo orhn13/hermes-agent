@@ -231,3 +231,44 @@ def test_onepassword_backend_env_forwards_config_directory(monkeypatch):
     backend = OnePasswordLoginBackend({"enabled": True})
 
     assert backend._env(None)["OP_CONFIG_DIR"] == "/tmp/op-config"
+
+
+_FAKE_OP_SERVICE_ACCOUNT = r'''#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+if os.environ.get("OP_SERVICE_ACCOUNT_TOKEN") != "ops_test":
+    sys.stderr.write("[ERROR] not signed in\n"); sys.exit(1)
+if argv[:2] == ["item", "list"]:
+    print(json.dumps([{"id": "drill", "title": "Drill login", "created_at": "2026-01-01T00:00:00Z",
+                       "additional_information": "drill@example.com", "vault": {"id": "vlt1", "name": "Shared"},
+                       "urls": [{"href": "https://example.com/sign-in"}]}])); sys.exit(0)
+if argv[:2] == ["item", "get"]:
+    if "--vault" not in argv:
+        sys.stderr.write("[ERROR] a vault query must be provided when this command is called by a service account. "
+                         "Please specify one either through the --vault flag or through piped input\n"); sys.exit(1)
+    if argv[argv.index("--vault") + 1] != "vlt1" or argv[2] != "drill":
+        sys.stderr.write("[ERROR] isn't an item in the specified vault\n"); sys.exit(1)
+    if "--otp" in argv:
+        print("123456"); sys.exit(0)
+    if argv[argv.index("--fields") + 1] == "label=password" and "--reveal" in argv:
+        print("drill password 9"); sys.exit(0)
+sys.exit(2)
+'''
+
+
+def test_onepassword_service_account_resolves_inside_the_items_own_vault(tmp_path, monkeypatch):
+    """Service accounts list items across vaults but refuse ``item get`` without ``--vault``;
+    resolving an ``op:<id>`` handle must name the vault the listing reported for that item."""
+    from agent.vault_backends.onepassword import OnePasswordLoginBackend
+
+    exe = tmp_path / "op"
+    exe.write_text(_FAKE_OP_SERVICE_ACCOUNT, encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "ops_test")
+    backend = OnePasswordLoginBackend({"enabled": True, "binary_path": str(exe)})
+
+    assert backend.is_unlocked()
+    assert [m.id for m in backend.list_items()] == ["op:drill"]
+    assert backend.resolve_password("op:drill") == "drill password 9"
+    assert backend.resolve_otp("op:drill") == "123456"
